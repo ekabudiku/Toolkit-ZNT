@@ -1,17 +1,8 @@
 # Toolkit-ZNT
-Berikut adalah draf deskripsi rilis (Release Notes) yang disusun dengan bahasa profesional, efektif, dan informatif. Anda dapat langsung menyalinnya ke kolom deskripsi pada halaman **Releases** di GitHub Anda.
-
----
-
-**Release Title:** Toolkit ZNT (Zona Nilai Tanah) v1.0.0 - Installer & Updater
-
-**Deskripsi:**
-
-Rilis perdana **Toolkit ZNT (Zona Nilai Tanah)** terintegrasi untuk ArcGIS Desktop dan ArcGIS Pro. Rilis ini menyediakan `InstallerToolkitZNT.exe` yang berfungsi ganda sebagai *installer* awal sekaligus *auto-updater*, memastikan Anda selalu mendapatkan pembaruan alat geoprocessing terbaru secara otomatis dari repositori.
 
 Toolkit ini mencakup 3 (tiga) modul utama pendukung manajemen dan validasi Zona Nilai Tanah:
 
-* **Zona Tepi Jalan:** Otomasi deliniasi zona tepi jalan menggunakan metode transek tegak lurus. Alat ini mendeteksi persil terdekat dalam radius pencarian, membuat *buffer* pada sisi tanpa persil, serta mengisi celah (*fill holes*) untuk menghasilkan satu poligon zona yang kohesif dan utuh.
+* **Generate Zona Tepi Jalan:** Otomasi deliniasi zona tepi jalan menggunakan metode transek tegak lurus. Alat ini mendeteksi persil terdekat dalam radius pencarian, membuat *buffer* pada sisi tanpa persil, serta mengisi celah (*fill holes*) untuk menghasilkan satu poligon zona yang kohesif dan utuh.
 
 
 * **Bagi Zona Surveyor:** Membagi poligon zona secara proporsional kepada sejumlah tim surveyor menggunakan algoritma *Recursive Spatial Bisection*. Memastikan beban kerja terdistribusi sama rata dengan area survei yang mengelompok secara spasial.
@@ -19,9 +10,9 @@ Toolkit ini mencakup 3 (tiga) modul utama pendukung manajemen dan validasi Zona 
 
 
 
-**Panduan Instalasi & Pembaruan:**
+**Panduan Download, Instalasi & Pembaruan:**
 
-1. Unduh file `InstallerToolkitZNT.exe` pada halaman release.
+1. Unduh file `InstallerToolkitZNT.exe` pada halaman [release](https://github.com/ekabudiku/Toolkit-ZNT/releases/tag/ZNT).
 2. Letakkan file tersebut di PC/Laptop Anda (direkomendasikan di *Desktop* agar mudah diakses).
 3. Klik ganda (2x) aplikasi tersebut untuk mengunduh dan memasang Toolkit secara otomatis ke folder `Documents\Toolkit ZNT`.
 4. Buka ArcGIS, klik kanan pada ArcToolbox -> **Add Toolbox** -> Arahkan ke file `ToolkitZNT.pyt` di folder tersebut.
