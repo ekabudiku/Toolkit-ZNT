@@ -30,12 +30,297 @@ except ImportError:
     import arcpy.mapping as arc_mapping
     IS_PRO = False
 
+
 class Toolbox(object):
     def __init__(self):
         self.label = "Toolkit ZNT (Zona Nilai Tanah)"
         self.alias = "toolkit_znt"
         # Daftar 5 tools
         self.tools = [ZonaTepiJalan, BagiZonaKompak, QCSurveiZona, BatchExportMXD, EkstrakZonaExcel]
+
+
+# =====================================================================
+# FUNGSI PENCOCOKAN KOLOM OTOMATIS (AUTO-DETECT FIELDS)
+# =====================================================================
+def _norm_nama_kolom(s):
+    """Normalisasi string nama kolom (hapus simbol/spasi, huruf kecil semua)."""
+    if not s:
+        return ""
+    return re.sub(r'[^a-z0-9]', '', unicode(s).lower())
+
+
+def tebak_kolom_terbaik(kolom_list, exact_candidates, keyword_candidates=None):
+    """
+    Mencari nama kolom paling cocok dari daftar kolom yang ada:
+    1. Cek kesamaan persis (case-insensitive)
+    2. Cek kesamaan setelah simbol/spasi dibersihkan (misal: 'Nilai Tanah/m2' == 'Nilai_Tanah_m2')
+    3. Cek apakah mengandung kata kunci (substring)
+    """
+    if not kolom_list:
+        return None
+
+    # 1. Exact match (case-insensitive, trim spasi)
+    for cand in exact_candidates:
+        c_up = unicode(cand).strip().upper()
+        for kol in kolom_list:
+            if unicode(kol).strip().upper() == c_up:
+                return kol
+
+    # 2. Normalized match (abaikan spasi, garis miring, underscore, titik)
+    for cand in exact_candidates:
+        c_norm = _norm_nama_kolom(cand)
+        if not c_norm:
+            continue
+        for kol in kolom_list:
+            if _norm_nama_kolom(kol) == c_norm:
+                return kol
+
+    # 3. Substring / Keyword match
+    if keyword_candidates:
+        for kw in keyword_candidates:
+            kw_norm = _norm_nama_kolom(kw)
+            if not kw_norm:
+                continue
+            for kol in kolom_list:
+                if kw_norm in _norm_nama_kolom(kol):
+                    return kol
+
+    return None
+
+
+# =====================================================================
+# FUNGSI EKSPOR EXCEL ANTI-GAGAL (DIGUNAKAN OLEH TOOL 3 & TOOL 5)
+# =====================================================================
+def normalisasi_path_output_excel(raw_path, fallback_ref_path=None):
+    """
+    Memastikan path output Excel:
+    1. Tidak berada di dalam Geodatabase (.gdb / .mdb / .sde)
+    2. Memiliki folder tujuan yang valid
+    3. Memiliki ekstensi .xlsx atau .xls yang sesuai
+    """
+    if not raw_path:
+        return None
+
+    clean_path = unicode(raw_path).strip().strip("'\"")
+    if not clean_path:
+        return None
+
+    norm_p = os.path.normpath(clean_path)
+    parts = norm_p.split(os.sep)
+    gdb_idx = None
+    for i, part in enumerate(parts):
+        if part.lower().endswith((".gdb", ".mdb", ".sde")):
+            gdb_idx = i
+            break
+
+    filename = os.path.basename(norm_p)
+    if gdb_idx is not None:
+        parent_dir = os.sep.join(parts[:gdb_idx])
+        if not parent_dir or not os.path.isdir(parent_dir):
+            if fallback_ref_path:
+                parent_dir = os.path.dirname(os.path.normpath(fallback_ref_path))
+                if parent_dir.lower().endswith((".gdb", ".mdb", ".sde")):
+                    parent_dir = os.path.dirname(parent_dir)
+            else:
+                parent_dir = os.path.expanduser("~")
+        clean_path = os.path.join(parent_dir, filename)
+
+    out_dir = os.path.dirname(clean_path)
+    if not out_dir:
+        if fallback_ref_path:
+            ref_dir = os.path.dirname(os.path.normpath(fallback_ref_path))
+            if ref_dir.lower().endswith((".gdb", ".mdb", ".sde")):
+                ref_dir = os.path.dirname(ref_dir)
+            out_dir = ref_dir
+        else:
+            out_dir = arcpy.env.scratchFolder or os.path.expanduser("~")
+        clean_path = os.path.join(out_dir, filename)
+
+    if out_dir and not os.path.exists(out_dir):
+        try:
+            os.makedirs(out_dir)
+        except Exception:
+            pass
+
+    if not clean_path.lower().endswith((".xlsx", ".xls")):
+        has_openpyxl = False
+        try:
+            import openpyxl
+            has_openpyxl = True
+        except ImportError:
+            pass
+
+        if IS_PRO or has_openpyxl:
+            clean_path += ".xlsx"
+        else:
+            clean_path += ".xls"
+
+    return clean_path
+
+
+def ekspor_data_ke_excel(headers, rows, field_specs, out_excel_raw, fallback_ref_path=None, messages=None):
+    """
+    Mengekspor data ke file Excel dengan 3 metode berlapis:
+    1. Native Python (openpyxl untuk .xlsx / xlwt untuk .xls)
+    2. arcpy.TableToExcel_conversion melalui scratchGDB (otomatis coba .xlsx dan .xls)
+    3. Fallback CSV (jika semua metode di atas gagal)
+    """
+    def log_msg(t):
+        if messages:
+            messages.addMessage(t)
+        else:
+            arcpy.AddMessage(t)
+
+    def log_warn(t):
+        if messages:
+            messages.addWarningMessage(t)
+        else:
+            arcpy.AddWarning(t)
+
+    out_excel = normalisasi_path_output_excel(out_excel_raw, fallback_ref_path)
+    if not out_excel:
+        return None
+
+    if os.path.exists(out_excel):
+        try:
+            os.remove(out_excel)
+        except Exception as e_rm:
+            base, ext = os.path.splitext(out_excel)
+            alt_path = "%s_new%s" % (base, ext)
+            log_warn("   File '%s' sedang terbuka/terkunci (%s). Menyimpan ke: %s" % (os.path.basename(out_excel), str(e_rm), alt_path))
+            out_excel = alt_path
+
+    ext = os.path.splitext(out_excel)[1].lower()
+
+    # METODE 1A: Gunakan openpyxl jika target .xlsx
+    if ext == ".xlsx":
+        try:
+            import openpyxl
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Ringkasan_QC"
+            ws.append([unicode(h) for h in headers])
+            for r in rows:
+                clean_r = []
+                for val in r:
+                    if val is None:
+                        clean_r.append("")
+                    elif isinstance(val, (int, long, float)):
+                        clean_r.append(val)
+                    else:
+                        clean_r.append(unicode(val))
+                ws.append(clean_r)
+            wb.save(out_excel)
+            wb.close()
+            log_msg("   Ringkasan Excel (.xlsx) berhasil disimpan ke: %s" % out_excel)
+            return out_excel
+        except Exception:
+            pass
+
+    # METODE 1B: Gunakan xlwt jika target .xls (atau di ArcMap Python 2.7)
+    try:
+        import xlwt
+        xls_path = out_excel if ext == ".xls" else os.path.splitext(out_excel)[0] + ".xls"
+        if ext == ".xls" or not IS_PRO:
+            if os.path.exists(xls_path):
+                try:
+                    os.remove(xls_path)
+                except Exception:
+                    xls_path = os.path.splitext(xls_path)[0] + "_new.xls"
+            wb = xlwt.Workbook(encoding="utf-8")
+            ws = wb.add_sheet("Ringkasan_QC")
+            for c_idx, h in enumerate(headers):
+                ws.write(0, c_idx, unicode(h))
+            for r_idx, r in enumerate(rows, start=1):
+                for c_idx, val in enumerate(r):
+                    if val is None:
+                        ws.write(r_idx, c_idx, u"")
+                    elif isinstance(val, (int, long, float)):
+                        ws.write(r_idx, c_idx, val)
+                    else:
+                        ws.write(r_idx, c_idx, unicode(val)[:32000])
+            wb.save(xls_path)
+            log_msg("   Ringkasan Excel (.xls) berhasil disimpan ke: %s" % xls_path)
+            return xls_path
+    except Exception:
+        pass
+
+    # METODE 2: Gunakan arcpy.TableToExcel_conversion via scratchGDB
+    scratch_gdb = arcpy.env.scratchGDB
+    if scratch_gdb and arcpy.Exists(scratch_gdb):
+        tbl_name = "tmp_excel_export"
+        temp_tbl = os.path.join(scratch_gdb, tbl_name)
+        try:
+            if arcpy.Exists(temp_tbl):
+                arcpy.Delete_management(temp_tbl)
+            arcpy.CreateTable_management(scratch_gdb, tbl_name)
+
+            field_names = []
+            for fname, ftype, flen in field_specs:
+                field_names.append(fname)
+                if ftype.upper() == "TEXT":
+                    arcpy.AddField_management(temp_tbl, fname, "TEXT", field_length=min(flen or 254, 254))
+                else:
+                    arcpy.AddField_management(temp_tbl, fname, ftype)
+
+            with arcpy.da.InsertCursor(temp_tbl, field_names) as icur:
+                for r in rows:
+                    clean_r = []
+                    for idx, val in enumerate(r):
+                        ftype = field_specs[idx][1].upper()
+                        flen = min(field_specs[idx][2] or 254, 254)
+                        if ftype == "TEXT":
+                            clean_r.append((unicode(val) if val is not None else u"-")[:flen])
+                        elif ftype in ("LONG", "SHORT"):
+                            clean_r.append(int(val) if val is not None else 0)
+                        else:
+                            clean_r.append(float(val) if val is not None else 0.0)
+                    icur.insertRow(clean_r)
+
+            candidates = [out_excel]
+            alt_ext = ".xls" if out_excel.lower().endswith(".xlsx") else ".xlsx"
+            candidates.append(os.path.splitext(out_excel)[0] + alt_ext)
+
+            for cand_path in candidates:
+                try:
+                    if os.path.exists(cand_path):
+                        os.remove(cand_path)
+                    arcpy.TableToExcel_conversion(temp_tbl, cand_path)
+                    if os.path.exists(cand_path):
+                        log_msg("   Ringkasan Excel berhasil disimpan ke: %s" % cand_path)
+                        return cand_path
+                except Exception:
+                    continue
+        except Exception as e_tte:
+            log_warn("   TableToExcel gagal (%s), mencoba fallback CSV..." % str(e_tte))
+        finally:
+            try:
+                if arcpy.Exists(temp_tbl):
+                    arcpy.Delete_management(temp_tbl)
+            except Exception:
+                pass
+
+    # METODE 3: Fallback ke CSV
+    try:
+        csv_path = os.path.splitext(out_excel)[0] + ".csv"
+        if sys.version_info[0] >= 3:
+            with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow([unicode(h) for h in headers])
+                for r in rows:
+                    writer.writerow([unicode(v) if v is not None else "" for v in r])
+        else:
+            with open(csv_path, "wb") as f:
+                f.write(b"\xef\xbb\xbf")
+                writer = csv.writer(f)
+                writer.writerow([unicode(h).encode("utf-8") for h in headers])
+                for r in rows:
+                    writer.writerow([(unicode(v) if v is not None else u"").encode("utf-8") for v in r])
+        log_warn("   Engine Excel tidak tersedia/terkunci. Ringkasan disimpan dalam format CSV (bisa dibuka langsung di Excel): %s" % csv_path)
+        return csv_path
+    except Exception as e_csv:
+        log_warn("   GAGAL total mengekspor ringkasan: %s" % str(e_csv))
+        return None
 
 
 # =====================================================================
@@ -399,21 +684,21 @@ class BagiZonaKompak(object):
 
 
 # =====================================================================
-# TOOL 3: QC SURVEI ZONA (UPDATED)
+# TOOL 3: QC SURVEI ZONA (AUTO-POPULATE FIELDS & EKSPOR EXCEL ANTI-GAGAL)
 # =====================================================================
 class QCSurveiZona(object):
     def __init__(self):
         self.label = "3. QC Hasil Survey (Jumlah Sampel & RSD)"
         self.description = (
             "Membaca titik survei dari berbagai format Excel (.xlsx, .xls, .xlsm) "
-            "maupun CSV/TXT/DBF, menyamakan proyeksi secara otomatis, melakukan "
+            "maupun CSV/TXT/DBF, mengisi otomatis kolom X, Y, Nilai Tanah/m2, "
+            "Nama Surveyor, dan NOZN, menyamakan proyeksi secara otomatis, melakukan "
             "spatial join ke poligon zona dengan mempertahankan 100% atribut Excel, "
             "serta menghitung RSD, status QC per zona, dan rekap surveyor."
         )
         self.canRunInBackground = True
 
     def getParameterInfo(self):
-        # p0: File Input (.xlsx, .xls, .csv, .txt, .dbf) ATAU Table View dari ArcMap
         p0 = arcpy.Parameter(
             displayName="File Input Survei (Excel .xlsx/.xls/.xlsm, CSV, TXT, atau Tabel)",
             name="input_file",
@@ -422,7 +707,6 @@ class QCSurveiZona(object):
             direction="Input"
         )
 
-        # p1: Pilihan Sheet jika input berupa file Excel
         p1 = arcpy.Parameter(
             displayName="Nama Sheet Excel (otomatis terisi jika input file Excel)",
             name="sheet_name",
@@ -433,7 +717,6 @@ class QCSurveiZona(object):
         p1.filter.type = "ValueList"
         p1.filter.list = []
 
-        # p2: Kolom X
         p2 = arcpy.Parameter(
             displayName="Kolom X (Longitude / Easting)",
             name="x_field",
@@ -444,7 +727,6 @@ class QCSurveiZona(object):
         p2.filter.type = "ValueList"
         p2.filter.list = []
 
-        # p3: Kolom Y
         p3 = arcpy.Parameter(
             displayName="Kolom Y (Latitude / Northing)",
             name="y_field",
@@ -455,7 +737,6 @@ class QCSurveiZona(object):
         p3.filter.type = "ValueList"
         p3.filter.list = []
 
-        # p4: Kolom Nilai Tanah
         p4 = arcpy.Parameter(
             displayName="Kolom Nilai (berisi nilai tanah per meter)",
             name="nilai_field",
@@ -466,7 +747,6 @@ class QCSurveiZona(object):
         p4.filter.type = "ValueList"
         p4.filter.list = []
 
-        # p5: Kolom Surveyor
         p5 = arcpy.Parameter(
             displayName="Surveyor/Penilai Tanah",
             name="surveyor_field",
@@ -477,7 +757,6 @@ class QCSurveiZona(object):
         p5.filter.type = "ValueList"
         p5.filter.list = []
 
-        # p6: Shapefile Poligon Zona
         p6 = arcpy.Parameter(
             displayName="Shapefile Zona (polygon)",
             name="shp_zona",
@@ -487,7 +766,6 @@ class QCSurveiZona(object):
         )
         p6.filter.list = ["Polygon"]
 
-        # p7: Field ID Zona (NOZN)
         p7 = arcpy.Parameter(
             displayName="NOZN (Kolom ID Zona)",
             name="id_zona_field",
@@ -497,7 +775,6 @@ class QCSurveiZona(object):
         )
         p7.parameterDependencies = [p6.name]
 
-        # p8: Output Poligon Zona Hasil QC
         p8 = arcpy.Parameter(
             displayName="Output Zona Hasil QC",
             name="output_fc",
@@ -506,7 +783,6 @@ class QCSurveiZona(object):
             direction="Output"
         )
 
-        # p9: Output Titik Sampel (Seluruh atribut Excel masuk ke sini)
         p9 = arcpy.Parameter(
             displayName="Output Titik Sampel",
             name="output_titik",
@@ -515,7 +791,6 @@ class QCSurveiZona(object):
             direction="Output"
         )
 
-        # p10: Skala Project
         p10 = arcpy.Parameter(
             displayName="Skala Project",
             name="skala",
@@ -527,7 +802,6 @@ class QCSurveiZona(object):
         p10.filter.list = ["2500", "10000", "25000"]
         p10.value = "10000"
 
-        # p11: Jumlah titik minimum per zona
         p11 = arcpy.Parameter(
             displayName="Jumlah titik minimum per zona",
             name="min_titik",
@@ -538,7 +812,6 @@ class QCSurveiZona(object):
         )
         p11.value = 3
 
-        # p12: Sistem koordinat input
         p12 = arcpy.Parameter(
             displayName="Sistem koordinat Excel/CSV (kosong = WGS 1984)",
             name="csv_sr",
@@ -547,42 +820,127 @@ class QCSurveiZona(object):
             direction="Input",
             category="Lanjutan"
         )
+        
+        p13 = arcpy.Parameter(
+            displayName="Output Excel Summary (Opsional)",
+            name="out_excel",
+            datatype="DEFile",
+            parameterType="Optional",
+            direction="Output"
+        )
 
-        return [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
+        return [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13]
 
     def isLicensed(self):
         return True
 
     def updateParameters(self, parameters):
+        # 1. DETEKSI OTOMATIS SHEET & KOLOM DARI FILE INPUT EXCEL/CSV
         in_path = parameters[0].valueAsText
-        if not in_path:
-            return
+        if in_path:
+            file_path, sub_sheet = urai_path_excel(in_path)
+            ext = os.path.splitext(file_path)[1].lower()
 
-        file_path, sub_sheet = urai_path_excel(in_path)
-        ext = os.path.splitext(file_path)[1].lower()
+            if ext in (".xls", ".xlsx", ".xlsm", ".xlsb"):
+                parameters[1].enabled = True
+                sheets = daftar_sheet_excel(file_path)
+                if sheets:
+                    parameters[1].filter.list = sheets
+                    if sub_sheet and sub_sheet in sheets and not parameters[1].altered:
+                        parameters[1].value = sub_sheet
+                    elif not parameters[1].valueAsText or parameters[1].valueAsText not in sheets:
+                        parameters[1].value = sheets[0]
+            else:
+                parameters[1].enabled = False
+                parameters[1].filter.list = []
+                parameters[1].value = None
 
-        if ext in (".xls", ".xlsx", ".xlsm", ".xlsb"):
-            parameters[1].enabled = True
-            sheets = daftar_sheet_excel(file_path)
-            if sheets:
-                parameters[1].filter.list = sheets
-                if sub_sheet and sub_sheet in sheets and not parameters[1].altered:
-                    parameters[1].value = sub_sheet
-                elif not parameters[1].valueAsText or parameters[1].valueAsText not in sheets:
-                    parameters[1].value = sheets[0]
-        else:
-            parameters[1].enabled = False
-            parameters[1].filter.list = []
-            parameters[1].value = None
+            chosen_sheet = parameters[1].valueAsText
+            kolom_list = baca_daftar_kolom_input(in_path, chosen_sheet)
 
-        chosen_sheet = parameters[1].valueAsText
-        kolom_list = baca_daftar_kolom_input(in_path, chosen_sheet)
+            if kolom_list:
+                # Pasang filter daftar kolom ke parameter 2, 3, 4, 5
+                for idx in (2, 3, 4, 5):
+                    parameters[idx].filter.list = kolom_list
+                    if parameters[idx].valueAsText and parameters[idx].valueAsText not in kolom_list:
+                        parameters[idx].value = None
 
-        if kolom_list:
-            for idx in (2, 3, 4, 5):
-                parameters[idx].filter.list = kolom_list
-                if parameters[idx].valueAsText and parameters[idx].valueAsText not in kolom_list:
-                    parameters[idx].value = None
+                # --- AUTO-FILL KOLOM X (Prioritas utama: "X") ---
+                if not parameters[2].valueAsText:
+                    auto_x = tebak_kolom_terbaik(
+                        kolom_list,
+                        exact_candidates=["X", "KOORDINAT_X", "KOORD_X", "LONGITUDE", "LONG", "LON", "EASTING", "POINT_X", "X_COORD", "BUJUR"],
+                        keyword_candidates=["koordinatx", "longitude", "easting", "pointx"]
+                    )
+                    if auto_x:
+                        parameters[2].value = auto_x
+
+                # --- AUTO-FILL KOLOM Y (Prioritas utama: "Y") ---
+                if not parameters[3].valueAsText:
+                    auto_y = tebak_kolom_terbaik(
+                        kolom_list,
+                        exact_candidates=["Y", "KOORDINAT_Y", "KOORD_Y", "LATITUDE", "LAT", "NORTHING", "POINT_Y", "Y_COORD", "LINTANG"],
+                        keyword_candidates=["koordinaty", "latitude", "northing", "pointy"]
+                    )
+                    if auto_y:
+                        parameters[3].value = auto_y
+
+                # --- AUTO-FILL KOLOM NILAI TANAH/M2 (Prioritas utama: "Nilai Tanah/m2") ---
+                if not parameters[4].valueAsText:
+                    auto_val = tebak_kolom_terbaik(
+                        kolom_list,
+                        exact_candidates=[
+                            "Nilai Tanah/m2", "NILAI TANAH/M2", "Nilai_Tanah_m2", "NILAI_TANAH_PER_M2",
+                            "Nilai Tanah / m2", "Nilai Tanah per m2", "Nilai Tanah", "NILAI_TANAH",
+                            "Harga/m2", "Harga Tanah/m2", "NIR", "RPBULAT", "NILAI", "HARGA"
+                        ],
+                        keyword_candidates=["nilaitanahm2", "nilaitanah", "hargatanah", "nilaiperm", "hargaperm", "nilai"]
+                    )
+                    if auto_val:
+                        parameters[4].value = auto_val
+
+                # --- AUTO-FILL KOLOM NAMA SURVEYOR (Prioritas utama: "Nama Surveyor") ---
+                if not parameters[5].valueAsText:
+                    auto_surv = tebak_kolom_terbaik(
+                        kolom_list,
+                        exact_candidates=[
+                            "Nama Surveyor", "NAMA SURVEYOR", "Nama_Surveyor", "NAMA_SURVEYOR",
+                            "Surveyor", "SURVEYOR", "Penilai Tanah", "Nama Penilai", "NAMA_PENILAI",
+                            "Penilai", "PENILAI", "Petugas", "Enumerator"
+                        ],
+                        keyword_candidates=["namasurveyor", "surveyor", "penilaitanah", "namapenilai", "penilai", "petugas"]
+                    )
+                    if auto_surv:
+                        parameters[5].value = auto_surv
+
+        # 2. DETEKSI OTOMATIS KOLOM ID ZONA PADA SHAPEFILE ZONA (Prioritas utama: "NOZN")
+        shp_zona = parameters[6].valueAsText
+        if shp_zona:
+            try:
+                zona_fields = [
+                    f.name for f in arcpy.ListFields(shp_zona)
+                    if f.type not in ("OID", "Geometry") and f.name.upper() not in ("SHAPE_LENGTH", "SHAPE_AREA")
+                ]
+                if zona_fields:
+                    curr_id_z = parameters[7].valueAsText
+                    if not curr_id_z or curr_id_z not in zona_fields:
+                        auto_nozn = tebak_kolom_terbaik(
+                            zona_fields,
+                            exact_candidates=["NOZN", "NO_ZONA", "NOZONA", "ID_ZONA", "IDZONA", "KODE_ZONA", "ZONA_ID", "ZONA"],
+                            keyword_candidates=["nozn", "nozona", "idzona", "kodezona"]
+                        )
+                        if auto_nozn:
+                            parameters[7].value = auto_nozn
+            except Exception:
+                pass
+
+        # 3. KOREKSI OTOMATIS JIKA OUTPUT EXCEL MASUK KE DALAM .GDB
+        if parameters[13].altered and parameters[13].valueAsText:
+            raw_ex = parameters[13].valueAsText
+            ref_fc = parameters[8].valueAsText
+            fixed_ex = normalisasi_path_output_excel(raw_ex, ref_fc)
+            if fixed_ex and fixed_ex != raw_ex:
+                parameters[13].value = fixed_ex
         return
 
     def updateMessages(self, parameters):
@@ -607,6 +965,7 @@ class QCSurveiZona(object):
         skala = unicode(parameters[10].valueAsText).strip()
         min_titik = int(parameters[11].value)
         csv_sr = parameters[12].value or arcpy.SpatialReference(4326)
+        out_excel = parameters[13].valueAsText
 
         max_rsd = {"2500": 15.0, "10000": 25.0, "25000": 30.0}.get(skala, 25.0)
 
@@ -745,11 +1104,12 @@ class QCSurveiZona(object):
                             continue
                         seen_target_zona.add(pair_key)
 
-                    d = zona_data.setdefault(norm_id, {"nilai": [], "surveyor": set()})
+                    d = zona_data.setdefault(norm_id, {"nilai": [], "surveyor": set(), "sampel": []})
 
                     v = bersihkan_angka(val)
                     if v is not None:
                         d["nilai"].append(v)
+                        d["sampel"].append(str(tfid) if tfid is not None else "?")
                     else:
                         n_nilai_invalid += 1
 
@@ -808,6 +1168,8 @@ class QCSurveiZona(object):
             n_valid = n_revisi = n_kurang = n_kosong = 0
             upd_fields = [col_id_out, f_jml, f_rata, f_rsd, f_stat, f_surv]
 
+            excel_rows_summary = []
+
             with arcpy.da.UpdateCursor(output_fc, upd_fields) as cur:
                 for row in cur:
                     norm_z = normalisasi_id_zona(row[0])
@@ -849,9 +1211,53 @@ class QCSurveiZona(object):
 
                     cur.updateRow([row[0], int(n), rata2_round, rsd_round, status_str, surv_str])
 
+                    daftar_sampel = ", ".join(d["sampel"]) if d.get("sampel") else "-"
+                    no_zona_str = unicode(row[0]) if row[0] is not None else u"-"
+                    excel_rows_summary.append([
+                        no_zona_str,
+                        int(n),
+                        daftar_sampel,
+                        float(rata2_round),
+                        float(rsd_round),
+                        unicode(status_str),
+                        unicode(surv_str)
+                    ])
+
             msg("Rekap zona: %d valid | %d perlu revisi | %d kurang lengkap | %d belum disurvey"
                 % (n_valid, n_revisi, n_kurang, n_kosong))
             arcpy.SetParameterAsText(8, output_fc)
+
+            # --- MULAI EKSPOR EXCEL ---
+            if out_excel:
+                msg("5. Mengekspor Ringkasan QC ke Excel (mengabaikan zona Belum Disurvey)...")
+                excel_rows_summary.sort(key=lambda r: natural_key(unicode(r[0])))
+
+                excel_headers = [
+                    "No_Zona", "Jml_Sampel", "Sampel_QC",
+                    "Rata_Nilai", "RSD_Persen", "Status_QC", "Surveyor"
+                ]
+                excel_specs = [
+                    ("No_Zona", "TEXT", 150),
+                    ("Jml_Sampel", "LONG", None),
+                    ("Sampel_QC", "TEXT", 254),
+                    ("Rata_Nilai", "DOUBLE", None),
+                    ("RSD_Persen", "DOUBLE", None),
+                    ("Status_QC", "TEXT", 150),
+                    ("Surveyor", "TEXT", 250)
+                ]
+
+                saved_excel = ekspor_data_ke_excel(
+                    headers=excel_headers,
+                    rows=excel_rows_summary,
+                    field_specs=excel_specs,
+                    out_excel_raw=out_excel,
+                    fallback_ref_path=output_fc,
+                    messages=messages
+                )
+                if saved_excel:
+                    arcpy.SetParameterAsText(13, saved_excel)
+            # --- AKHIR EKSPOR EXCEL ---
+
             msg("Proses selesai.")
 
         finally:
@@ -1089,7 +1495,6 @@ class EkstrakZonaExcel(object):
 
         p_out = arcpy.Parameter(name="out_excel", displayName="6. Output File Excel",
                                 datatype="DEFile", parameterType="Required", direction="Output")
-        p_out.filter.list = ["xls", "xlsx"]
 
         return [p_zona, p_fld_zona, p_fld_harga, p_metode,
                 p_kec, p_fld_kec, p_enable_desa, p_desa, p_fld_desa,
@@ -1104,6 +1509,31 @@ class EkstrakZonaExcel(object):
         parameters[8].enabled = enabled
         metode = parameters[3].valueAsText or ""
         parameters[9].enabled = ("Centroid" not in metode)
+
+        # Auto-fill NOZN dan RPBULAT/Rata_Nilai pada Layer Zona
+        if parameters[0].valueAsText:
+            try:
+                z_fields = [
+                    f.name for f in arcpy.ListFields(parameters[0].valueAsText)
+                    if f.type not in ("OID", "Geometry")
+                ]
+                if z_fields:
+                    if not parameters[1].valueAsText or parameters[1].valueAsText not in z_fields:
+                        auto_z = tebak_kolom_terbaik(z_fields, ["NOZN", "NO_ZONA", "ID_ZONA", "ZONA"])
+                        if auto_z:
+                            parameters[1].value = auto_z
+                    if not parameters[2].valueAsText or parameters[2].valueAsText not in z_fields:
+                        auto_h = tebak_kolom_terbaik(z_fields, ["RPBULAT", "NIR", "Rata_Nilai", "NILAI", "HARGA"])
+                        if auto_h:
+                            parameters[2].value = auto_h
+            except Exception:
+                pass
+
+        if parameters[10].altered and parameters[10].valueAsText:
+            raw_ex = parameters[10].valueAsText
+            fixed_ex = normalisasi_path_output_excel(raw_ex)
+            if fixed_ex and fixed_ex != raw_ex:
+                parameters[10].value = fixed_ex
         return
 
     def updateMessages(self, parameters):
@@ -1177,7 +1607,7 @@ class EkstrakZonaExcel(object):
             arcpy.AddMessage("     -> CRS eksekusi: {0}".format(sr_zona.name))
 
             stats = _sum_new_stats()
-            records = []       
+            records = []
             desa_lookup = None
 
             if use_closest:
@@ -1313,27 +1743,32 @@ class EkstrakZonaExcel(object):
             rows_to_insert = _sum_aggregate_by_kecamatan(records, desa_lookup, enable_desa)
 
             arcpy.AddMessage("4/4: Menyusun tabel Excel fokus per KECAMATAN...")
-            arcpy.CreateTable_management(scratch_db, "tabel_export_tmp")
+            sum_headers = [
+                "KECAMATAN", "ZNT_TERENDAH", "ZONA_TERENDAH", "DESA_TERENDAH",
+                "ZNT_TERTINGGI", "ZONA_TERTINGGI", "DESA_TERTINGGI"
+            ]
+            sum_specs = [
+                ("KECAMATAN", "TEXT", 150),
+                ("ZNT_TERENDAH", "DOUBLE", None),
+                ("ZONA_TERENDAH", "TEXT", 254),
+                ("DESA_TERENDAH", "TEXT", 254),
+                ("ZNT_TERTINGGI", "DOUBLE", None),
+                ("ZONA_TERTINGGI", "TEXT", 254),
+                ("DESA_TERTINGGI", "TEXT", 254)
+            ]
 
-            arcpy.AddField_management(temp_table, "KECAMATAN", "TEXT", field_length=150)
-            arcpy.AddField_management(temp_table, "ZNT_TERENDAH", "DOUBLE")
-            arcpy.AddField_management(temp_table, "ZONA_TERENDAH", "TEXT", field_length=1000)
-            arcpy.AddField_management(temp_table, "DESA_TERENDAH", "TEXT", field_length=1000)
-            arcpy.AddField_management(temp_table, "ZNT_TERTINGGI", "DOUBLE")
-            arcpy.AddField_management(temp_table, "ZONA_TERTINGGI", "TEXT", field_length=1000)
-            arcpy.AddField_management(temp_table, "DESA_TERTINGGI", "TEXT", field_length=1000)
-
-            with arcpy.da.InsertCursor(
-                    temp_table,
-                    ["KECAMATAN", "ZNT_TERENDAH", "ZONA_TERENDAH", "DESA_TERENDAH",
-                     "ZNT_TERTINGGI", "ZONA_TERTINGGI", "DESA_TERTINGGI"]) as icursor:
-                for row_data in rows_to_insert:
-                    icursor.insertRow(row_data)
-
-            arcpy.TableToExcel_conversion(temp_table, out_excel)
+            saved_excel = ekspor_data_ke_excel(
+                headers=sum_headers,
+                rows=rows_to_insert,
+                field_specs=sum_specs,
+                out_excel_raw=out_excel,
+                messages=messages
+            )
+            if saved_excel:
+                arcpy.SetParameterAsText(10, saved_excel)
 
             arcpy.AddMessage("=== PROSES SELESAI ===")
-            arcpy.AddMessage("{0} baris Kecamatan ditulis ke: {1}".format(len(rows_to_insert), out_excel))
+            arcpy.AddMessage("{0} baris Kecamatan ditulis ke: {1}".format(len(rows_to_insert), saved_excel or out_excel))
 
         except Exception as e:
             tb = sys.exc_info()[2]
@@ -1614,15 +2049,6 @@ def siapkan_tabel_gdb_terkunci(in_path, sheet_name, out_gdb, out_table_name,
         idx_y = cari_indeks_header_persis(headers, y_field_user)
         idx_val = cari_indeks_header_persis(headers, nilai_field_user)
         idx_surv = cari_indeks_header_persis(headers, surv_field_user)
-
-        sampel_nilai = []
-        for r in rows:
-            if idx_val < len(r):
-                vn = bersihkan_angka(r[idx_val])
-                if vn is not None:
-                    sampel_nilai.append(vn)
-                if len(sampel_nilai) >= 5:
-                    break
 
         arcpy.CreateTable_management(out_gdb, out_table_name)
         used_gdb_names = set(["OBJECTID", "FID", "SHAPE", "QC_X_NUM", "QC_Y_NUM", "QC_VAL_NUM", "QC_SURV_TXT"])
