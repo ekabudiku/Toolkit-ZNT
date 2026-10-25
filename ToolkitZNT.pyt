@@ -684,17 +684,15 @@ class BagiZonaKompak(object):
 
 
 # =====================================================================
-# TOOL 3: QC SURVEI ZONA (AUTO-POPULATE FIELDS & EKSPOR EXCEL ANTI-GAGAL)
+# TOOL 3: QC SURVEI ZONA 
 # =====================================================================
 class QCSurveiZona(object):
     def __init__(self):
         self.label = "3. QC Hasil Survey (Jumlah Sampel & RSD)"
         self.description = (
-            "Membaca titik survei dari berbagai format Excel (.xlsx, .xls, .xlsm) "
-            "maupun CSV/TXT/DBF, mengisi otomatis kolom X, Y, Nilai Tanah/m2, "
-            "Nama Surveyor, dan NOZN, menyamakan proyeksi secara otomatis, melakukan "
-            "spatial join ke poligon zona dengan mempertahankan 100% atribut Excel, "
-            "serta menghitung RSD, status QC per zona, dan rekap surveyor."
+            "Membaca titik survei dari berbagai format Excel/CSV, mengisi otomatis parameter, "
+            "menyamakan proyeksi, melakukan spatial join absolut ke poligon zona, "
+            "serta menghitung RSD, status QC per zona, dan rekap surveyor tanpa distorsi ID."
         )
         self.canRunInBackground = True
 
@@ -829,13 +827,23 @@ class QCSurveiZona(object):
             direction="Output"
         )
 
-        return [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13]
+        p14 = arcpy.Parameter(
+            displayName="Kolom Nomor/ID Sampel dari Excel (Opsional)",
+            name="id_titik_field",
+            datatype="GPString",
+            parameterType="Optional",
+            direction="Input",
+            category="Lanjutan"
+        )
+        p14.filter.type = "ValueList"
+        p14.filter.list = []
+
+        return [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14]
 
     def isLicensed(self):
         return True
 
     def updateParameters(self, parameters):
-        # 1. DETEKSI OTOMATIS SHEET & KOLOM DARI FILE INPUT EXCEL/CSV
         in_path = parameters[0].valueAsText
         if in_path:
             file_path, sub_sheet = urai_path_excel(in_path)
@@ -859,82 +867,48 @@ class QCSurveiZona(object):
             kolom_list = baca_daftar_kolom_input(in_path, chosen_sheet)
 
             if kolom_list:
-                # Pasang filter daftar kolom ke parameter 2, 3, 4, 5
-                for idx in (2, 3, 4, 5):
+                for idx in (2, 3, 4, 5, 14):
                     parameters[idx].filter.list = kolom_list
                     if parameters[idx].valueAsText and parameters[idx].valueAsText not in kolom_list:
                         parameters[idx].value = None
 
-                # --- AUTO-FILL KOLOM X (Prioritas utama: "X") ---
                 if not parameters[2].valueAsText:
-                    auto_x = tebak_kolom_terbaik(
-                        kolom_list,
-                        exact_candidates=["X", "KOORDINAT_X", "KOORD_X", "LONGITUDE", "LONG", "LON", "EASTING", "POINT_X", "X_COORD", "BUJUR"],
-                        keyword_candidates=["koordinatx", "longitude", "easting", "pointx"]
-                    )
-                    if auto_x:
-                        parameters[2].value = auto_x
+                    auto_x = tebak_kolom_terbaik(kolom_list, exact_candidates=["X", "KOORDINAT_X", "LONGITUDE", "EASTING"], keyword_candidates=["longitude", "easting"])
+                    if auto_x: parameters[2].value = auto_x
 
-                # --- AUTO-FILL KOLOM Y (Prioritas utama: "Y") ---
                 if not parameters[3].valueAsText:
-                    auto_y = tebak_kolom_terbaik(
-                        kolom_list,
-                        exact_candidates=["Y", "KOORDINAT_Y", "KOORD_Y", "LATITUDE", "LAT", "NORTHING", "POINT_Y", "Y_COORD", "LINTANG"],
-                        keyword_candidates=["koordinaty", "latitude", "northing", "pointy"]
-                    )
-                    if auto_y:
-                        parameters[3].value = auto_y
+                    auto_y = tebak_kolom_terbaik(kolom_list, exact_candidates=["Y", "KOORDINAT_Y", "LATITUDE", "NORTHING"], keyword_candidates=["latitude", "northing"])
+                    if auto_y: parameters[3].value = auto_y
 
-                # --- AUTO-FILL KOLOM NILAI TANAH/M2 (Prioritas utama: "Nilai Tanah/m2") ---
                 if not parameters[4].valueAsText:
-                    auto_val = tebak_kolom_terbaik(
-                        kolom_list,
-                        exact_candidates=[
-                            "Nilai Tanah/m2", "NILAI TANAH/M2", "Nilai_Tanah_m2", "NILAI_TANAH_PER_M2",
-                            "Nilai Tanah / m2", "Nilai Tanah per m2", "Nilai Tanah", "NILAI_TANAH",
-                            "Harga/m2", "Harga Tanah/m2", "NIR", "RPBULAT", "NILAI", "HARGA"
-                        ],
-                        keyword_candidates=["nilaitanahm2", "nilaitanah", "hargatanah", "nilaiperm", "hargaperm", "nilai"]
-                    )
-                    if auto_val:
-                        parameters[4].value = auto_val
+                    auto_val = tebak_kolom_terbaik(kolom_list, exact_candidates=["Nilai Tanah/m2", "Nilai_Tanah_m2", "NIR"], keyword_candidates=["nilaitanah", "harga"])
+                    if auto_val: parameters[4].value = auto_val
 
-                # --- AUTO-FILL KOLOM NAMA SURVEYOR (Prioritas utama: "Nama Surveyor") ---
                 if not parameters[5].valueAsText:
-                    auto_surv = tebak_kolom_terbaik(
-                        kolom_list,
-                        exact_candidates=[
-                            "Nama Surveyor", "NAMA SURVEYOR", "Nama_Surveyor", "NAMA_SURVEYOR",
-                            "Surveyor", "SURVEYOR", "Penilai Tanah", "Nama Penilai", "NAMA_PENILAI",
-                            "Penilai", "PENILAI", "Petugas", "Enumerator"
-                        ],
-                        keyword_candidates=["namasurveyor", "surveyor", "penilaitanah", "namapenilai", "penilai", "petugas"]
-                    )
-                    if auto_surv:
-                        parameters[5].value = auto_surv
+                    auto_surv = tebak_kolom_terbaik(kolom_list, exact_candidates=["Nama Surveyor", "Surveyor", "Penilai"], keyword_candidates=["surveyor", "penilai"])
+                    if auto_surv: parameters[5].value = auto_surv
 
-        # 2. DETEKSI OTOMATIS KOLOM ID ZONA PADA SHAPEFILE ZONA (Prioritas utama: "NOZN")
+                if not parameters[14].valueAsText:
+                    auto_id_sampel = tebak_kolom_terbaik(
+                        kolom_list, 
+                        exact_candidates=["ID_TITIK", "NO_SAMPEL", "ID_SAMPEL", "NO", "NOMOR", "FID_TITIK", "ID"], 
+                        keyword_candidates=["idsampel", "idtitik", "nomor"]
+                    )
+                    if auto_id_sampel:
+                        parameters[14].value = auto_id_sampel
+
         shp_zona = parameters[6].valueAsText
         if shp_zona:
             try:
-                zona_fields = [
-                    f.name for f in arcpy.ListFields(shp_zona)
-                    if f.type not in ("OID", "Geometry") and f.name.upper() not in ("SHAPE_LENGTH", "SHAPE_AREA")
-                ]
+                zona_fields = [f.name for f in arcpy.ListFields(shp_zona) if f.type not in ("OID", "Geometry")]
                 if zona_fields:
                     curr_id_z = parameters[7].valueAsText
                     if not curr_id_z or curr_id_z not in zona_fields:
-                        auto_nozn = tebak_kolom_terbaik(
-                            zona_fields,
-                            exact_candidates=["NOZN", "NO_ZONA", "NOZONA", "ID_ZONA", "IDZONA", "KODE_ZONA", "ZONA_ID", "ZONA"],
-                            keyword_candidates=["nozn", "nozona", "idzona", "kodezona"]
-                        )
-                        if auto_nozn:
-                            parameters[7].value = auto_nozn
+                        auto_nozn = tebak_kolom_terbaik(zona_fields, exact_candidates=["NOZN", "ID_ZONA", "ZONA"], keyword_candidates=["nozn", "kodezona"])
+                        if auto_nozn: parameters[7].value = auto_nozn
             except Exception:
                 pass
 
-        # 3. KOREKSI OTOMATIS JIKA OUTPUT EXCEL MASUK KE DALAM .GDB
         if parameters[13].altered and parameters[13].valueAsText:
             raw_ex = parameters[13].valueAsText
             ref_fc = parameters[8].valueAsText
@@ -946,8 +920,7 @@ class QCSurveiZona(object):
     def updateMessages(self, parameters):
         if parameters[11].value is not None and parameters[11].value < 2:
             parameters[11].setErrorMessage("Minimum titik harus >= 2 agar RSD bisa dihitung")
-        if parameters[2].value and parameters[3].value and \
-                parameters[2].valueAsText == parameters[3].valueAsText:
+        if parameters[2].value and parameters[3].value and parameters[2].valueAsText == parameters[3].valueAsText:
             parameters[3].setErrorMessage("Kolom Y tidak boleh sama dengan kolom X")
         return
 
@@ -966,6 +939,7 @@ class QCSurveiZona(object):
         min_titik = int(parameters[11].value)
         csv_sr = parameters[12].value or arcpy.SpatialReference(4326)
         out_excel = parameters[13].valueAsText
+        id_titik_field = parameters[14].valueAsText 
 
         max_rsd = {"2500": 15.0, "10000": 25.0, "25000": 30.0}.get(skala, 25.0)
 
@@ -995,10 +969,15 @@ class QCSurveiZona(object):
                 gagal("Shapefile zona tidak punya sistem koordinat (Unknown).")
             if sr_tidak_dikenal(csv_sr):
                 gagal("Sistem koordinat Excel/CSV tidak valid/Unknown.")
-            msg("   Zona  : %s" % zona_sr.name)
-            msg("   Input : %s" % csv_sr.name)
+            
+            msg("1. Menyiapkan poligon zona dan mengamankan Spatial ID...")
+            arcpy.CopyFeatures_management(shp_zona, output_fc)
+            
+            kolom_zona_spasial = "ID_ZONA_TRUE_SPAT"
+            arcpy.AddField_management(output_fc, kolom_zona_spasial, "TEXT", field_length=150)
+            arcpy.CalculateField_management(output_fc, kolom_zona_spasial, "!{}!".format(id_zona_field), "PYTHON_9.3")
 
-            msg("1. Membaca file input dan mengunci kolom X, Y, Nilai, serta Surveyor...")
+            msg("2. Membaca file input Excel dan membangun geometri titik...")
             if arcpy.Exists(temp_table):
                 arcpy.Delete_management(temp_table)
 
@@ -1006,7 +985,6 @@ class QCSurveiZona(object):
                 in_file, sheet_name, scratch, "qc_temp_table",
                 x_field, y_field, nilai_field, surveyor_field, messages
             )
-
             cek_rentang_xy(temp_table, "QC_X_NUM", "QC_Y_NUM", csv_sr, messages)
 
             if arcpy.Exists(temp_layer):
@@ -1017,15 +995,26 @@ class QCSurveiZona(object):
                 arcpy.Delete_management(temp_points)
             arcpy.CopyFeatures_management(temp_layer, temp_points)
 
-            internal_cols = ("QC_X_NUM", "QC_Y_NUM", "QC_VAL_NUM", "QC_SURV_TXT")
             n_pt = int(arcpy.GetCount_management(temp_points).getOutput(0))
-            jml_atribut = len([
-                f for f in arcpy.ListFields(temp_points)
-                if f.type not in ("OID", "Geometry") and f.name.upper() not in internal_cols
-            ])
-            msg("   %d titik dan %d kolom atribut asli berhasil terbaca" % (n_pt, jml_atribut))
             if n_pt == 0:
                 gagal("Tidak ada titik terbentuk. Cek kolom X/Y pada file input.")
+
+            # =========================================================
+            # MENGUNCI NOMOR SAMPEL AGAR ANTI-GESER
+            # =========================================================
+            msg("   Mengamankan Nomor Sampel asli dari file Excel...")
+            kolom_sampel_aman = "ID_SMPL" 
+            arcpy.AddField_management(temp_points, kolom_sampel_aman, "TEXT", field_length=50)
+            
+            field_points = [f.name for f in arcpy.ListFields(temp_points)]
+            col_id_titik_aktual = cari_nama_kolom_ketat(field_points, id_titik_field, wajib=False) if id_titik_field else None
+
+            if col_id_titik_aktual:
+                arcpy.CalculateField_management(temp_points, kolom_sampel_aman, "!{}!".format(col_id_titik_aktual), "PYTHON_9.3")
+            else:
+                code_block = "rec = 0\ndef get_id():\n    global rec\n    rec += 1\n    return str(rec)"
+                arcpy.CalculateField_management(temp_points, kolom_sampel_aman, "get_id()", "PYTHON_9.3", code_block)
+            # =========================================================
 
             titik_siap = temp_points
             if not sr_sama(csv_sr, zona_sr):
@@ -1038,89 +1027,63 @@ class QCSurveiZona(object):
                 else:
                     arcpy.Project_management(temp_points, temp_proj, zona_sr)
                 titik_siap = temp_proj
-            else:
-                msg("   CRS titik dan zona sudah sama, proyeksi dilewati.")
 
-            cek_overlap(titik_siap, shp_zona, messages)
+            cek_overlap(titik_siap, output_fc, messages)
 
-            msg("2. Spatial join titik ke zona (mempertahankan seluruh atribut input)...")
+            msg("3. Spatial join titik ke zona (berdasarkan letak spasial murni)...")
             if arcpy.Exists(temp_join):
                 arcpy.Delete_management(temp_join)
 
-            fms_join, col_id = bangun_field_mappings_lengkap(
-                titik_siap, shp_zona, id_zona_field, is_shp=False
-            )
-
             arcpy.SpatialJoin_analysis(
                 target_features=titik_siap,
-                join_features=shp_zona,
+                join_features=output_fc,
                 out_feature_class=temp_join,
                 join_operation="JOIN_ONE_TO_MANY",
                 join_type="KEEP_ALL",
-                field_mapping=fms_join,
                 match_option="INTERSECT"
             )
 
             if output_titik:
-                msg("   Menyimpan titik hasil join beserta seluruh atribut asli...")
+                msg("   Menyimpan titik hasil join...")
                 simpan_titik_hasil_join(temp_join, output_titik)
                 arcpy.SetParameterAsText(9, output_titik)
 
-            msg("3. Menghitung RSD dan merekap surveyor per zona...")
+            msg("4. Menghitung RSD dan merekap surveyor per zona...")
             actual = [f.name for f in arcpy.ListFields(temp_join)]
-            col_id_actual = cari_nama_kolom_ketat(actual, col_id)
+            
+            col_id_actual = cari_nama_kolom_ketat(actual, kolom_zona_spasial)
             col_nilai_actual = cari_nama_kolom_ketat(actual, "QC_VAL_NUM")
             col_surv_actual = cari_nama_kolom_ketat(actual, "QC_SURV_TXT")
-            col_tfid_actual = cari_nama_kolom_ketat(actual, "TARGET_FID", wajib=False)
+            col_sampel_actual = cari_nama_kolom_ketat(actual, "ID_SMPL")
 
             zona_data = {}
-            n_luar = 0
             n_nilai_invalid = 0
-            seen_target_zona = set()
-            luar_fids = set()
 
-            cursor_fields = [col_id_actual, col_nilai_actual, col_surv_actual]
-            if col_tfid_actual:
-                cursor_fields.append(col_tfid_actual)
-
+            cursor_fields = [col_id_actual, col_nilai_actual, col_surv_actual, col_sampel_actual]
+            
             with arcpy.da.SearchCursor(temp_join, cursor_fields) as cur:
                 for row_j in cur:
-                    id_z = row_j[0]
+                    id_z = row_j[0]       
                     val = row_j[1]
                     surv = row_j[2]
-                    tfid = row_j[3] if col_tfid_actual else None
+                    id_sampel = row_j[3]  
 
                     norm_id = normalisasi_id_zona(id_z)
                     if norm_id is None:
-                        if tfid is not None:
-                            luar_fids.add(tfid)
-                        else:
-                            n_luar += 1
                         continue
-
-                    if tfid is not None:
-                        pair_key = (norm_id, tfid)
-                        if pair_key in seen_target_zona:
-                            continue
-                        seen_target_zona.add(pair_key)
 
                     d = zona_data.setdefault(norm_id, {"nilai": [], "surveyor": set(), "sampel": []})
 
                     v = bersihkan_angka(val)
                     if v is not None:
                         d["nilai"].append(v)
-                        d["sampel"].append(str(tfid) if tfid is not None else "?")
+                        d["sampel"].append(unicode(id_sampel) if id_sampel is not None else "?")
                     else:
                         n_nilai_invalid += 1
 
                     if surv is not None and unicode(surv).strip() not in ("", "-", "None", "NULL"):
                         d["surveyor"].add(unicode(surv).strip())
 
-            if col_tfid_actual:
-                n_luar = len(luar_fids)
-
-            if n_luar:
-                messages.addWarningMessage("   %d titik berada di luar semua poligon zona." % n_luar)
             if n_nilai_invalid:
                 messages.addWarningMessage(
                     "   %d titik di dalam zona memiliki nilai kosong/bukan angka pada kolom '%s'."
@@ -1129,8 +1092,7 @@ class QCSurveiZona(object):
 
             msg("   Total zona yang memiliki titik survei: %d zona" % len(zona_data))
 
-            msg("4. Menyiapkan output zona (skala 1:%s, batas RSD %.0f%%)..." % (skala, max_rsd))
-            arcpy.CopyFeatures_management(shp_zona, output_fc)
+            msg("5. Mengkalkulasi Atribut QC Final...")
             out_fields = [f.name for f in arcpy.ListFields(output_fc)]
             col_id_out = cari_nama_kolom_ketat(out_fields, id_zona_field)
 
@@ -1142,21 +1104,21 @@ class QCSurveiZona(object):
                 ("Surveyor", "TEXT", 254)
             ]
             for fname, ftype, flen in qc_field_specs:
-                existing_match = cari_nama_kolom_ketat(
-                    [f.name for f in arcpy.ListFields(output_fc)], fname, wajib=False
-                )
+                existing_match = cari_nama_kolom_ketat([f.name for f in arcpy.ListFields(output_fc)], fname, wajib=False)
                 if existing_match and existing_match.upper() != col_id_out.upper():
                     try:
                         arcpy.DeleteField_management(output_fc, existing_match)
                     except Exception:
                         pass
-
                 existing_now = [f.name.upper() for f in arcpy.ListFields(output_fc)]
                 if fname.upper() not in existing_now and fname[:10].upper() not in existing_now:
                     if flen:
                         arcpy.AddField_management(output_fc, fname, ftype, field_length=flen)
                     else:
                         arcpy.AddField_management(output_fc, fname, ftype)
+
+            if kolom_zona_spasial in [f.name for f in arcpy.ListFields(output_fc)]:
+                arcpy.DeleteField_management(output_fc, kolom_zona_spasial)
 
             out_fields_updated = [f.name for f in arcpy.ListFields(output_fc)]
             f_jml = cari_nama_kolom_ketat(out_fields_updated, "Jml_Titik")
@@ -1167,7 +1129,6 @@ class QCSurveiZona(object):
 
             n_valid = n_revisi = n_kurang = n_kosong = 0
             upd_fields = [col_id_out, f_jml, f_rata, f_rsd, f_stat, f_surv]
-
             excel_rows_summary = []
 
             with arcpy.da.UpdateCursor(output_fc, upd_fields) as cur:
@@ -1184,6 +1145,7 @@ class QCSurveiZona(object):
                     n = len(vals)
                     rata2 = float(sum(vals)) / float(n)
                     rsd = 0.0
+                    
                     if n > 1 and rata2 != 0.0:
                         var = sum((float(x) - rata2) ** 2 for x in vals) / float(n - 1)
                         std_dev = math.sqrt(var)
@@ -1213,6 +1175,7 @@ class QCSurveiZona(object):
 
                     daftar_sampel = ", ".join(d["sampel"]) if d.get("sampel") else "-"
                     no_zona_str = unicode(row[0]) if row[0] is not None else u"-"
+                    
                     excel_rows_summary.append([
                         no_zona_str,
                         int(n),
@@ -1229,13 +1192,10 @@ class QCSurveiZona(object):
 
             # --- MULAI EKSPOR EXCEL ---
             if out_excel:
-                msg("5. Mengekspor Ringkasan QC ke Excel (mengabaikan zona Belum Disurvey)...")
+                msg("6. Mengekspor Ringkasan QC ke Excel (mengabaikan zona Belum Disurvey)...")
                 excel_rows_summary.sort(key=lambda r: natural_key(unicode(r[0])))
 
-                excel_headers = [
-                    "No_Zona", "Jml_Sampel", "Sampel_QC",
-                    "Rata_Nilai", "RSD_Persen", "Status_QC", "Surveyor"
-                ]
+                excel_headers = ["No_Zona", "Jml_Sampel", "Sampel_QC", "Rata_Nilai", "RSD_Persen", "Status_QC", "Surveyor"]
                 excel_specs = [
                     ("No_Zona", "TEXT", 150),
                     ("Jml_Sampel", "LONG", None),
@@ -1268,7 +1228,6 @@ class QCSurveiZona(object):
                 except Exception:
                     pass
         return
-
 
 # =====================================================================
 # TOOL 4: BATCH EXPORT MXD
