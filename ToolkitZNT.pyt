@@ -973,7 +973,7 @@ class QCSurveiZona(object):
             msg("1. Menyiapkan poligon zona dan mengamankan Spatial ID...")
             arcpy.CopyFeatures_management(shp_zona, output_fc)
             
-            kolom_zona_spasial = "ID_ZONA_TRUE_SPAT"
+            kolom_zona_spasial = "ID_ZN_SPAT"
             arcpy.AddField_management(output_fc, kolom_zona_spasial, "TEXT", field_length=150)
             arcpy.CalculateField_management(output_fc, kolom_zona_spasial, "!{}!".format(id_zona_field), "PYTHON_9.3")
 
